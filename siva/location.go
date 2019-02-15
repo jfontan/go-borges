@@ -12,21 +12,20 @@ import (
 var (
 	// ErrMalformedData when checkpoint data is invalid.
 	ErrMalformedData = errors.NewKind("malformed data")
-	// ErrTransactioning is returned when a second transaction wants to start
+	// ErrInTransaction is returned when a second transaction wants to start
 	// in the same location.
-	ErrTransactioning = errors.NewKind("already doing a transaction")
+	ErrInTransaction = errors.NewKind("already doing a transaction")
 )
 
 type Location struct {
-	id   borges.LocationID
-	path string
-	// cachedFS billy.Filesystem
+	id       borges.LocationID
+	path     string
 	cachedFS sivafs.SivaFS
 	library  *Library
 
 	// last good position
-	checkpoint     *Checkpoint
-	transactioning bool
+	checkpoint    *Checkpoint
+	inTransaction bool
 }
 
 var _ borges.Location = (*Location)(nil)
@@ -196,8 +195,8 @@ func (l *Location) setupTransaction(mode borges.Mode) (sivafs.SivaFS, error) {
 		return l.FS()
 	}
 
-	if l.transactioning {
-		return nil, ErrTransactioning.New()
+	if l.inTransaction {
+		return nil, ErrInTransaction.New()
 	}
 
 	fs, err := l.newFS()
@@ -209,34 +208,39 @@ func (l *Location) setupTransaction(mode borges.Mode) (sivafs.SivaFS, error) {
 		return nil, err
 	}
 
-	l.transactioning = true
+	l.library.startTransaction(l)
+	l.inTransaction = true
 	return fs, nil
 }
 
 func (l *Location) Commit() error {
-	if !l.transactional() || !l.transactioning {
+	if !l.transactional() || !l.inTransaction {
 		return nil
 	}
+
+	defer l.library.endTransaction(l)
 
 	if err := l.checkpoint.Reset(); err != nil {
 		return err
 	}
 
-	l.transactioning = false
+	l.inTransaction = false
 	l.cachedFS = nil
 	return nil
 }
 
 func (l *Location) Rollback() error {
-	if !l.transactional() || !l.transactioning {
+	if !l.transactional() || !l.inTransaction {
 		return nil
 	}
+
+	defer l.library.endTransaction(l)
 
 	if err := l.checkpoint.Apply(); err != nil {
 		return err
 	}
 
-	l.transactioning = false
+	l.inTransaction = false
 	l.cachedFS = nil
 	return nil
 }
