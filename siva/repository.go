@@ -2,10 +2,12 @@ package siva
 
 import (
 	borges "github.com/src-d/go-borges"
+	"github.com/src-d/go-borges/util"
 
 	sivafs "gopkg.in/src-d/go-billy-siva.v4"
 	git "gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/plumbing/cache"
+	"gopkg.in/src-d/go-git.v4/storage"
 	"gopkg.in/src-d/go-git.v4/storage/filesystem"
 )
 
@@ -29,7 +31,13 @@ func NewRepository(
 	m borges.Mode,
 	l *Location,
 ) (*Repository, error) {
-	sto := filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	var sto storage.Storer
+
+	sto = filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	if m == borges.ReadOnlyMode {
+		sto = &util.ReadOnlyStorer{Storer: sto}
+	}
+
 	repo, err := git.Open(sto, nil)
 	if err != nil {
 		if err == git.ErrRepositoryNotExists {
