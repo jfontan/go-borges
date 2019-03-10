@@ -10,6 +10,7 @@ import (
 	borges "github.com/src-d/go-borges"
 	"github.com/src-d/go-borges/util"
 
+	"github.com/src-d/borges/lock"
 	billy "gopkg.in/src-d/go-billy.v4"
 	"gopkg.in/src-d/go-billy.v4/osfs"
 	butil "gopkg.in/src-d/go-billy.v4/util"
@@ -27,6 +28,7 @@ type Library struct {
 	transactional bool
 	timeout       time.Duration
 	locReg        *locationRegistry
+	lock          lock.Session
 }
 
 // LibraryOptions hold configuration options for the library.
@@ -41,6 +43,8 @@ type LibraryOptions struct {
 	RegistryCache int
 	// TempFS is the temporary filesystem to do transactions and write files.
 	TempFS billy.Filesystem
+	// Lock service to use. If not set a local service is created.
+	Lock lock.Service
 }
 
 var _ borges.Library = (*Library)(nil)
@@ -74,6 +78,22 @@ func NewLibrary(
 		tmp = osfs.New(dir)
 	}
 
+	l := ops.Lock
+	if l == nil {
+		l, err = lock.New("local:")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	ls, err := l.NewSession(&lock.SessionConfig{
+		Timeout: ops.Timeout,
+		TTL:     10 * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return &Library{
 		id:            borges.LibraryID(id),
 		fs:            fs,
@@ -81,6 +101,7 @@ func NewLibrary(
 		transactional: ops.Transactional,
 		timeout:       timeout,
 		locReg:        lr,
+		lock:          ls,
 	}, nil
 }
 
@@ -187,8 +208,11 @@ func (l *Library) location(id borges.LocationID, create bool) (borges.Location, 
 		return loc, nil
 	}
 
+	lockID := fmt.Sprintf("borges/%s/%s", l.id, id)
+	locker := l.lock.NewLocker(lockID)
+
 	path := fmt.Sprintf("%s.siva", id)
-	loc, err := newLocation(id, l, path, create)
+	loc, err := newLocation(id, l, path, create, locker)
 	if err != nil {
 		return nil, err
 	}

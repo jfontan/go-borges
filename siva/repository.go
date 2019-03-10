@@ -5,6 +5,7 @@ import (
 
 	borges "github.com/src-d/go-borges"
 
+	"github.com/src-d/borges/lock"
 	errors "gopkg.in/src-d/go-errors.v1"
 	git "gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/storage"
@@ -24,6 +25,7 @@ type Repository struct {
 
 	mu     sync.Mutex
 	closed bool
+	locker lock.Locker
 
 	location *Location
 }

@@ -258,7 +258,10 @@ func (s *repoSuite) TestTransaction_Timeout() {
 
 	var require = s.Require()
 
-	s.lib.timeout = 100 * time.Millisecond
+	s.lib = setupLibrary(s.T(), "test", LibraryOptions{
+		Transactional: s.transactional,
+		Timeout:       100 * time.Millisecond,
+	})
 
 	loc, err := s.lib.AddLocation("test")
 	require.NoError(err)
