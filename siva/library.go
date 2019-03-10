@@ -3,13 +3,16 @@ package siva
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"strings"
 	"time"
 
 	borges "github.com/src-d/go-borges"
-
 	"github.com/src-d/go-borges/util"
+
+	"github.com/src-d/borges/lock"
 	billy "gopkg.in/src-d/go-billy.v4"
+	"gopkg.in/src-d/go-billy.v4/osfs"
 	butil "gopkg.in/src-d/go-billy.v4/util"
 	errors "gopkg.in/src-d/go-errors.v1"
 )
@@ -21,9 +24,11 @@ var ErrLocationExists = errors.NewKind("location %s already exists")
 type Library struct {
 	id            borges.LibraryID
 	fs            billy.Filesystem
+	tmp           billy.Filesystem
 	transactional bool
 	timeout       time.Duration
 	locReg        *locationRegistry
+	lock          lock.Session
 }
 
 // LibraryOptions hold configuration options for the library.
@@ -36,6 +41,10 @@ type LibraryOptions struct {
 	// RegistryCache is the maximum number of locations in the cache. A value
 	// of 0 disables the cache.
 	RegistryCache int
+	// TempFS is the temporary filesystem to do transactions and write files.
+	TempFS billy.Filesystem
+	// Lock service to use. If not set a local service is created.
+	Lock lock.Service
 }
 
 var _ borges.Library = (*Library)(nil)
@@ -59,12 +68,40 @@ func NewLibrary(
 		timeout = txTimeout
 	}
 
+	tmp := ops.TempFS
+	if tmp == nil {
+		dir, err := ioutil.TempDir("", "go-borges")
+		if err != nil {
+			return nil, err
+		}
+
+		tmp = osfs.New(dir)
+	}
+
+	l := ops.Lock
+	if l == nil {
+		l, err = lock.New("local:")
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	ls, err := l.NewSession(&lock.SessionConfig{
+		Timeout: ops.Timeout,
+		TTL:     10 * time.Second,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return &Library{
 		id:            borges.LibraryID(id),
 		fs:            fs,
+		tmp:           tmp,
 		transactional: ops.Transactional,
 		timeout:       timeout,
 		locReg:        lr,
+		lock:          ls,
 	}, nil
 }
 
@@ -171,8 +208,11 @@ func (l *Library) location(id borges.LocationID, create bool) (borges.Location, 
 		return loc, nil
 	}
 
+	lockID := fmt.Sprintf("borges/%s/%s", l.id, id)
+	locker := l.lock.NewLocker(lockID)
+
 	path := fmt.Sprintf("%s.siva", id)
-	loc, err := newLocation(id, l, path, create)
+	loc, err := newLocation(id, l, path, create, locker)
 	if err != nil {
 		return nil, err
 	}

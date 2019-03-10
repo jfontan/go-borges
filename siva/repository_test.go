@@ -171,12 +171,10 @@ func (s *repoSuite) TestCommit_ReadOnly() {
 
 	err = r.Commit()
 	if s.transactional {
-		require.NoError(r.Commit())
+		require.NoError(err)
 	} else {
 		require.True(borges.ErrNonTransactional.Is(err))
 	}
-
-	require.NoError(r.Close())
 }
 
 func (s *repoSuite) TestCommit_RW() {
@@ -260,7 +258,10 @@ func (s *repoSuite) TestTransaction_Timeout() {
 
 	var require = s.Require()
 
-	s.lib.timeout = 100 * time.Millisecond
+	s.lib = setupLibrary(s.T(), "test", LibraryOptions{
+		Transactional: s.transactional,
+		Timeout:       100 * time.Millisecond,
+	})
 
 	loc, err := s.lib.AddLocation("test")
 	require.NoError(err)

@@ -5,14 +5,30 @@ import (
 	"sync"
 
 	borges "github.com/src-d/go-borges"
+	"github.com/src-d/go-borges/util"
+
+	"github.com/src-d/borges/lock"
 	sivafs "gopkg.in/src-d/go-billy-siva.v4"
 	"gopkg.in/src-d/go-billy.v4/memfs"
 	"gopkg.in/src-d/go-errors.v1"
 	"gopkg.in/src-d/go-git.v4/config"
+	"gopkg.in/src-d/go-git.v4/plumbing/cache"
+	"gopkg.in/src-d/go-git.v4/storage"
+	"gopkg.in/src-d/go-git.v4/storage/filesystem"
 )
 
-// ErrMalformedData when checkpoint data is invalid.
-var ErrMalformedData = errors.NewKind("malformed data")
+var (
+	// ErrMalformedData when checkpoint data is invalid.
+	ErrMalformedData = errors.NewKind("malformed data")
+
+	// ErrLockLost means that the location no longer holds the lock.
+	ErrLockLost = errors.NewKind("lock lost")
+
+	// ErrTransactionTimeout is returned when a repository can't be retrieved in
+	// transactional mode because of a timeout.
+	ErrTransactionTimeout = errors.NewKind("timeout exceeded: unable to " +
+		"retrieve repository from location %s in transactional mode.")
+)
 
 // Location represents a siva file archiving several git repositories.
 type Location struct {
@@ -21,8 +37,9 @@ type Location struct {
 	cachedFS   sivafs.SivaFS
 	lib        *Library
 	checkpoint *checkpoint
-	txer       *transactioner
 	mu         sync.Mutex
+	locker     lock.Locker
+	lockCh     <-chan struct{}
 }
 
 var _ borges.Location = (*Location)(nil)
@@ -34,6 +51,7 @@ func newLocation(
 	lib *Library,
 	path string,
 	create bool,
+	locker lock.Locker,
 ) (*Location, error) {
 	cp, err := newCheckpoint(lib.fs, path, create)
 	if err != nil {
@@ -45,9 +63,9 @@ func newLocation(
 		path:       path,
 		lib:        lib,
 		checkpoint: cp,
+		locker:     locker,
 	}
 
-	loc.txer = newTransactioner(loc, lib.locReg, lib.timeout)
 	return loc, nil
 }
 
@@ -228,31 +246,51 @@ func (l *Location) Repositories(mode borges.Mode) (borges.RepositoryIterator, er
 
 // Commit persists transactional or write operations performed on the repositories.
 func (l *Location) Commit(mode borges.Mode) error {
-	if !l.lib.transactional || mode != borges.RWMode {
+	if !l.lib.transactional {
+		return borges.ErrNonTransactional.New()
+	}
+
+	if mode != borges.RWMode {
 		return nil
 	}
 
-	defer l.txer.Stop()
-	if err := l.checkpoint.Reset(); err != nil {
+	defer func() {
+		l.cachedFS = nil
+		l.unlock()
+	}()
+
+	err := l.checkLock()
+	if err != nil {
 		return err
 	}
 
-	l.cachedFS = nil
+	if err = l.checkpoint.Reset(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // Rollback discard transactional or write operations performed on the repositories.
 func (l *Location) Rollback(mode borges.Mode) error {
+	if mode == borges.RWMode {
+		defer func() { l.cachedFS = nil }()
+	}
+
 	if !l.lib.transactional || mode != borges.RWMode {
 		return nil
 	}
 
-	defer l.txer.Stop()
+	defer l.unlock()
+
+	if err := l.checkLock(); err != nil {
+		return err
+	}
+
 	if err := l.checkpoint.Apply(); err != nil {
 		return err
 	}
 
-	l.cachedFS = nil
 	return nil
 }
 
@@ -260,12 +298,29 @@ func (l *Location) repository(
 	id borges.RepositoryID,
 	mode borges.Mode,
 ) (borges.Repository, error) {
+	var sto storage.Storer
+
 	fs, err := l.getRepoFS(mode)
 	if err != nil {
 		return nil, err
 	}
 
-	return newRepository(id, fs, mode, l.lib.transactional, l)
+	switch mode {
+	case borges.ReadOnlyMode:
+		sto = filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+		sto = &util.ReadOnlyStorer{Storer: sto}
+
+	case borges.RWMode:
+		sto, err = NewStorage(l.lib.fs, l.path, l.lib.tmp, l.lib.transactional)
+		if err != nil {
+			return nil, err
+		}
+
+	default:
+		return nil, borges.ErrModeNotSupported.New(mode)
+	}
+
+	return newRepository(id, sto, mode, l.lib.transactional, l)
 }
 
 func (l *Location) getRepoFS(mode borges.Mode) (sivafs.SivaFS, error) {
@@ -273,7 +328,7 @@ func (l *Location) getRepoFS(mode borges.Mode) (sivafs.SivaFS, error) {
 		return l.FS()
 	}
 
-	if err := l.txer.Start(); err != nil {
+	if err := l.lock(); err != nil {
 		return nil, err
 	}
 
@@ -287,4 +342,30 @@ func (l *Location) getRepoFS(mode borges.Mode) (sivafs.SivaFS, error) {
 	}
 
 	return fs, nil
+}
+
+func (l *Location) lock() error {
+	ch, err := l.locker.Lock()
+	if err != nil {
+		return ErrTransactionTimeout.New()
+	}
+
+	l.lib.locReg.StartTransaction(l)
+
+	l.lockCh = ch
+	return nil
+}
+
+func (l *Location) unlock() error {
+	l.lib.locReg.EndTransaction(l)
+	return l.locker.Unlock()
+}
+
+func (l *Location) checkLock() error {
+	select {
+	case <-l.lockCh:
+		return ErrLockLost.New()
+	default:
+		return nil
+	}
 }
