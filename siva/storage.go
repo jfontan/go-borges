@@ -183,5 +183,8 @@ func getSivaFS(
 		return nil, err
 	}
 
-	return sivafs.NewFilesystem(base, path, sivaTmpFS)
+	ops := sivafs.SivaFSOptions{
+		UnsafePaths: true,
+	}
+	return sivafs.NewFilesystemWithOptions(base, path, sivaTmpFS, ops)
 }
