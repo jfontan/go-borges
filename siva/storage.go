@@ -22,17 +22,23 @@ const (
 	baseSivaName    = "base"
 )
 
+type Committer interface {
+	Commit() error
+	Close() error
+}
+
 // Storage holds a ReadWrite siva storage. It can be transactional in which
 // case it will write to a temporary siva file and will append it to the
 // original siva on Commit.
 type Storage struct {
 	storage.Storer
 
-	base   billy.Filesystem
-	path   string
-	fs     sivafs.SivaFS
-	tmp    billy.Filesystem
-	tmpDir string
+	base          billy.Filesystem
+	path          string
+	fs            sivafs.SivaFS
+	tmp           billy.Filesystem
+	tmpDir        string
+	transactional bool
 }
 
 // NewStorage creates a new Storage struct. A new temporary directory is created
@@ -42,6 +48,7 @@ func NewStorage(
 	path string,
 	tmp billy.Filesystem,
 	transaction bool,
+	repoID string,
 ) (*Storage, error) {
 	rootDir, err := butil.TempDir(tmp, "/", "go-borges")
 	if err != nil {
@@ -65,16 +72,21 @@ func NewStorage(
 		cleanup()
 		return nil, err
 	}
-	baseStorage := filesystem.NewStorage(baseFS, c)
+	var baseStorage storage.Storer = filesystem.NewStorage(baseFS, c)
 
 	if !transaction {
+		if repoID != "" {
+			baseStorage = NewRootedStorage(baseStorage, repoID)
+		}
+
 		return &Storage{
-			Storer: baseStorage,
-			base:   base,
-			path:   path,
-			fs:     baseFS,
-			tmp:    tmp,
-			tmpDir: rootDir,
+			Storer:        baseStorage,
+			base:          base,
+			path:          path,
+			fs:            baseFS,
+			tmp:           tmp,
+			tmpDir:        rootDir,
+			transactional: false,
 		}, nil
 	}
 
@@ -88,15 +100,20 @@ func NewStorage(
 	}
 	transactionStorage := filesystem.NewStorage(transactionFS, c)
 
-	sto := transactional.NewStorage(baseStorage, transactionStorage)
+	var sto storage.Storer
+	sto = transactional.NewStorage(baseStorage, transactionStorage)
+	if repoID != "" {
+		sto = NewRootedStorage(sto, repoID)
+	}
 
 	return &Storage{
-		Storer: sto,
-		base:   base,
-		path:   path,
-		fs:     transactionFS,
-		tmp:    tmp,
-		tmpDir: rootDir,
+		Storer:        sto,
+		base:          base,
+		path:          path,
+		fs:            transactionFS,
+		tmp:           tmp,
+		tmpDir:        rootDir,
+		transactional: true,
 	}, nil
 }
 
@@ -112,8 +129,7 @@ func (s *Storage) Commit() error {
 		return err
 	}
 
-	_, ok := s.Storer.(transactional.Storage)
-	if !ok {
+	if !s.transactional {
 		return nil
 	}
 

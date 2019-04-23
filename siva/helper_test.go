@@ -19,19 +19,19 @@ const testDir = "../_testdata/siva"
 
 func setupMemFS(t *testing.T) (billy.Filesystem, []string) {
 	t.Helper()
-	return setupFS(t, true)
+	return setupFS(t, testDir, true)
 }
 
 func setupOSFS(t *testing.T) (billy.Filesystem, []string) {
 	t.Helper()
-	return setupFS(t, false)
+	return setupFS(t, testDir, false)
 }
 
-func setupFS(t *testing.T, inMem bool) (billy.Filesystem, []string) {
+func setupFS(t *testing.T, dir string, inMem bool) (billy.Filesystem, []string) {
 	t.Helper()
 	require := require.New(t)
 
-	entries, err := ioutil.ReadDir(testDir)
+	entries, err := ioutil.ReadDir(dir)
 	require.NoError(err)
 
 	var sivas []string
@@ -56,7 +56,7 @@ func setupFS(t *testing.T, inMem bool) (billy.Filesystem, []string) {
 	}
 
 	for _, siva := range sivas {
-		path := filepath.Join(testDir, siva)
+		path := filepath.Join(dir, siva)
 		data, err := ioutil.ReadFile(path)
 		require.NoError(err)
 		err = util.WriteFile(fs, siva, data, 0666)

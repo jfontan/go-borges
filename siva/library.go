@@ -25,6 +25,7 @@ type Library struct {
 	fs            billy.Filesystem
 	tmp           billy.Filesystem
 	transactional bool
+	rooted        bool
 	timeout       time.Duration
 	locReg        *locationRegistry
 }
@@ -41,6 +42,9 @@ type LibraryOptions struct {
 	RegistryCache int
 	// TempFS is the temporary filesystem to do transactions and write files.
 	TempFS billy.Filesystem
+	// RootedRepo makes the repository show only the references for the remote
+	// named with the repository ID.
+	RootedRepo bool
 }
 
 var _ borges.Library = (*Library)(nil)
@@ -79,6 +83,7 @@ func NewLibrary(
 		fs:            fs,
 		tmp:           tmp,
 		transactional: ops.Transactional,
+		rooted:        ops.RootedRepo,
 		timeout:       timeout,
 		locReg:        lr,
 	}, nil
