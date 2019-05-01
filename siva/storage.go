@@ -49,6 +49,7 @@ func NewStorage(
 	tmp billy.Filesystem,
 	transaction bool,
 	repoID string,
+	cache cache.Object,
 ) (*Storage, error) {
 	rootDir, err := butil.TempDir(tmp, "/", "go-borges")
 	if err != nil {
@@ -65,14 +66,12 @@ func NewStorage(
 		return nil, err
 	}
 
-	c := cache.NewObjectLRUDefault()
-
 	baseFS, err := getSivaFS(base, path, rootFS, baseSivaName)
 	if err != nil {
 		cleanup()
 		return nil, err
 	}
-	var baseStorage storage.Storer = filesystem.NewStorage(baseFS, c)
+	var baseStorage storage.Storer = filesystem.NewStorage(baseFS, cache)
 
 	if !transaction {
 		if repoID != "" {
@@ -98,7 +97,7 @@ func NewStorage(
 		cleanup()
 		return nil, err
 	}
-	transactionStorage := filesystem.NewStorage(transactionFS, c)
+	transactionStorage := filesystem.NewStorage(transactionFS, cache)
 
 	var sto storage.Storer
 	sto = transactional.NewStorage(baseStorage, transactionStorage)

@@ -270,6 +270,14 @@ func (l *Location) Rollback(mode borges.Mode) error {
 	return nil
 }
 
+func (l *Location) cache() cache.Object {
+	if l.lib.options.Cache != nil {
+		return l.lib.options.Cache
+	}
+
+	return cache.NewObjectLRUDefault()
+}
+
 func (l *Location) repository(
 	id borges.RepositoryID,
 	mode borges.Mode,
@@ -283,14 +291,20 @@ func (l *Location) repository(
 
 	switch mode {
 	case borges.ReadOnlyMode:
-		sto = filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+		gitStorerOptions := filesystem.Options{
+			ExclusiveAccess: true,
+			KeepDescriptors: true,
+		}
+
+		sto = filesystem.NewStorageWithOptions(fs, l.cache(), gitStorerOptions)
 		sto = &util.ReadOnlyStorer{Storer: sto}
 		if id != "" && l.lib.rooted {
 			sto = NewRootedStorage(sto, string(id))
 		}
 
 	case borges.RWMode:
-		sto, err = NewStorage(l.lib.fs, l.path, l.lib.tmp, l.lib.transactional, "")
+		sto, err = NewStorage(l.lib.fs, l.path, l.lib.tmp,
+			l.lib.transactional, "", l.cache())
 		if err != nil {
 			return nil, err
 		}
