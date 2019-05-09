@@ -165,6 +165,85 @@ func TestRootedSetReference(t *testing.T) {
 	require.NoError(err)
 }
 
+func TestRootedIterateObjects(t *testing.T) {
+	options := LibraryOptions{
+		RootedRepo: true,
+	}
+
+	fs, _ := setupFS(t, "../_testdata/rooted", true)
+	lib, err := NewLibrary("rooted", fs, options)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		commits int
+		trees   int
+	}{
+		{
+			name:    "gitserver.com/a",
+			commits: 3,
+			trees:   3,
+		},
+		{
+			name:    "gitserver.com/b",
+			commits: 5,
+			trees:   5,
+		},
+		{
+			name:    "gitserver.com/c",
+			commits: 6,
+			trees:   6,
+		},
+		{
+			name:    "gitserver.com/d",
+			commits: 14,
+			trees:   20,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			id := borges.RepositoryID(test.name)
+			repo, err := lib.Get(id, borges.ReadOnlyMode)
+			require.NoError(t, err)
+			defer repo.Close()
+
+			r := repo.R()
+
+			iter, err := r.Storer.IterEncodedObjects(plumbing.CommitObject)
+			require.NoError(t, err)
+
+			var commits int
+			err = iter.ForEach(func(obj plumbing.EncodedObject) error {
+				commits++
+
+				require.Equal(t, plumbing.CommitObject, obj.Type())
+				println("commit", obj.Hash().String())
+				return nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, test.commits, commits,
+				"the number of commits is incorrect")
+
+			iter, err = r.Storer.IterEncodedObjects(plumbing.TreeObject)
+			require.NoError(t, err)
+
+			var trees int
+			err = iter.ForEach(func(obj plumbing.EncodedObject) error {
+				trees++
+
+				require.Equal(t, plumbing.TreeObject, obj.Type(),
+					"object type is incorrect")
+				println("trees", obj.Hash().String())
+				return nil
+			})
+			require.NoError(t, err)
+			require.Equal(t, test.trees, trees,
+				"the number of trees is incorrect")
+		})
+	}
+}
+
 func hr(n, h string) *plumbing.Reference {
 	return plumbing.NewHashReference(
 		plumbing.ReferenceName(n),

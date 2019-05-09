@@ -272,6 +272,7 @@ func (l *Location) Rollback(mode borges.Mode) error {
 
 func (l *Location) cache() cache.Object {
 	if l.lib.options.Cache != nil {
+		println("using cache", l.lib.options.Cache)
 		return l.lib.options.Cache
 	}
 
@@ -291,6 +292,7 @@ func (l *Location) repository(
 
 	switch mode {
 	case borges.ReadOnlyMode:
+		println("read only")
 		gitStorerOptions := filesystem.Options{
 			ExclusiveAccess: true,
 			KeepDescriptors: true,

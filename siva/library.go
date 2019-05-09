@@ -90,6 +90,7 @@ func NewLibrary(
 		rooted:        ops.RootedRepo,
 		timeout:       timeout,
 		locReg:        lr,
+		options:       ops,
 	}, nil
 }
 

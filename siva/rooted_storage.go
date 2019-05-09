@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"gopkg.in/src-d/go-git.v4/plumbing"
+	"gopkg.in/src-d/go-git.v4/plumbing/object"
 	"gopkg.in/src-d/go-git.v4/plumbing/storer"
 	"gopkg.in/src-d/go-git.v4/storage"
 )
@@ -178,6 +179,7 @@ func (r *RootedStorage) Reference(
 
 // IterReferences implements ReferenceStorer interface.
 func (r *RootedStorage) IterReferences() (storer.ReferenceIter, error) {
+	println("new iter references", r.id)
 	iter, err := r.Storer.IterReferences()
 	if err != nil {
 		return nil, err
@@ -196,6 +198,71 @@ func (r *RootedStorage) RemoveReference(ref plumbing.ReferenceName) error {
 	return r.Storer.RemoveReference(n)
 }
 
+// CommitObjects implements
+func (r *RootedStorage) IterEncodedObjects(
+	t plumbing.ObjectType,
+) (storer.EncodedObjectIter, error) {
+	switch t {
+	case plumbing.CommitObject:
+		return r.commitObjects()
+
+	case plumbing.TreeObject:
+		return r.treeObjects()
+
+	default:
+		return r.Storer.IterEncodedObjects(t)
+	}
+}
+
+func (r *RootedStorage) commitObjects() (storer.EncodedObjectIter, error) {
+	println("new commit iter")
+	commits, err := r.commitIter()
+	if err != nil {
+		return nil, err
+	}
+
+	return &commitObjectIter{
+		commits: commits,
+	}, nil
+}
+
+func (r *RootedStorage) commitIter() (*commitIter, error) {
+	refs, err := r.IterReferences()
+	if err != nil {
+		return nil, err
+	}
+
+	return &commitIter{
+		sto:  r,
+		refs: refs,
+		seen: make(map[plumbing.Hash]bool),
+	}, nil
+}
+
+func (r *RootedStorage) treeObjects() (storer.EncodedObjectIter, error) {
+	trees, err := r.treeIter()
+	if err != nil {
+		return nil, err
+	}
+
+	return &treeObjectIter{
+		trees: trees,
+		sto:   r,
+	}, nil
+}
+
+func (r *RootedStorage) treeIter() (*treeIter, error) {
+	commits, err := r.commitIter()
+	if err != nil {
+		return nil, err
+	}
+
+	return &treeIter{
+		commits: commits,
+		seen:    make(map[plumbing.Hash]bool),
+	}, nil
+}
+
 type refIter struct {
 	iter   storer.ReferenceIter
 	prefix string
@@ -211,6 +278,7 @@ func (r *refIter) Next() (*plumbing.Reference, error) {
 
 		name := string(ref.Name())
 		if strings.HasPrefix(name, r.prefix) {
+			// println("ref", name, r.prefix)
 			return r.sto.convertReferenceFromRemote(ref)
 		}
 	}
@@ -236,4 +304,281 @@ func (r *refIter) ForEach(f func(*plumbing.Reference) error) error {
 
 func (r *refIter) Close() {
 	r.iter.Close()
+}
+
+// commitIter iterates all the commits reachable by the repository
+// references. It returns *object.Commit.
+type commitIter struct {
+	sto  *RootedStorage
+	refs storer.ReferenceIter
+	seen map[plumbing.Hash]bool
+	log  object.CommitIter
+}
+
+func (c *commitIter) Next() (*object.Commit, error) {
+	var err error
+	var ref *plumbing.Reference
+	var commit *object.Commit
+
+	for {
+		if c.log == nil {
+			ref, err = c.refs.Next()
+			if err != nil {
+				println("COMMITS", len(c.seen))
+				return nil, err
+			}
+
+			if _, ok := c.seen[ref.Hash()]; ok {
+				continue
+			}
+
+			commit, err := object.GetCommit(c.sto, ref.Hash())
+			if err == plumbing.ErrObjectNotFound {
+				continue
+			}
+
+			if err != nil {
+				println("error get commit", c.sto.id, ref.Hash().String(), err.Error())
+				return nil, err
+			}
+
+			c.log = object.NewCommitPreorderIter(commit, c.seen, nil)
+			// c.log = object.NewCommitPostorderIter(commit, nil)
+		}
+
+		commit, err = c.log.Next()
+		if err == io.EOF {
+			if c.log != nil {
+				c.log.Close()
+				c.log = nil
+			}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		c.seen[commit.Hash] = true
+
+		return commit, nil
+	}
+}
+
+func (c *commitIter) ForEach(f func(*object.Commit) error) error {
+	defer c.Close()
+	for {
+		commit, err := c.Next()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		err = f(commit)
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func (r *commitIter) Close() {
+	if r != nil {
+		if r.log != nil {
+			r.log.Close()
+		}
+
+		if r.refs != nil {
+			r.refs.Close()
+		}
+	}
+}
+
+type commitObjectIter struct {
+	commits *commitIter
+}
+
+func (c *commitObjectIter) Next() (plumbing.EncodedObject, error) {
+	for {
+		commit, err := c.commits.Next()
+		if err != nil {
+			return nil, err
+		}
+
+		obj, err := c.commits.sto.EncodedObject(plumbing.CommitObject, commit.Hash)
+		if err == plumbing.ErrObjectNotFound {
+			continue
+		}
+
+		return obj, err
+	}
+}
+
+func (c *commitObjectIter) ForEach(f func(plumbing.EncodedObject) error) error {
+	return encodedObjectIterForEach(c, f)
+}
+
+func (c *commitObjectIter) Close() {
+	c.commits.Close()
+}
+
+type treeIter struct {
+	commits *commitIter
+	seen    map[plumbing.Hash]bool
+	walker  *object.TreeWalker
+	queue   []plumbing.Hash
+	entries []object.TreeEntry
+}
+
+func (t *treeIter) Next() (*object.Tree, error) {
+	for {
+		if len(t.entries) == 0 {
+			if len(t.queue) == 0 {
+				commit, err := t.commits.Next()
+				if err == plumbing.ErrObjectNotFound {
+					continue
+				}
+				if err != nil {
+					println("TREES", len(t.seen))
+					return nil, err
+				}
+
+				tree, err := commit.Tree()
+				if err != nil {
+					return nil, err
+				}
+
+				if _, ok := t.seen[tree.Hash]; ok {
+					continue
+				}
+
+				t.entries = tree.Entries
+				t.seen[tree.Hash] = true
+
+				return tree, err
+			} else {
+				tree, err := object.GetTree(t.commits.sto, t.queue[0])
+				t.queue = t.queue[1:]
+
+				if err == plumbing.ErrObjectNotFound {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+
+				if _, ok := t.seen[tree.Hash]; ok {
+					continue
+				}
+
+				t.entries = tree.Entries
+				t.seen[tree.Hash] = true
+
+				return tree, err
+			}
+		}
+
+		entry := t.entries[0]
+		t.entries = t.entries[1:]
+
+		if entry.Mode.IsFile() {
+			continue
+		}
+
+		if _, ok := t.seen[entry.Hash]; ok {
+			continue
+		}
+		t.seen[entry.Hash] = true
+
+		tree, err := object.GetTree(t.commits.sto, entry.Hash)
+		if err == plumbing.ErrObjectNotFound {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		t.queue = append(t.queue, entry.Hash)
+		return tree, nil
+	}
+}
+
+func (t *treeIter) ForEach(f func(*object.Tree) error) error {
+	defer t.Close()
+	for {
+		tree, err := t.Next()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		err = f(tree)
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func (t *treeIter) Close() {
+	if t != nil {
+		if t.walker != nil {
+			t.walker.Close()
+		}
+
+		if t.commits != nil {
+			t.commits.Close()
+		}
+	}
+}
+
+type treeObjectIter struct {
+	trees *treeIter
+	sto   *RootedStorage
+}
+
+func (c *treeObjectIter) Next() (plumbing.EncodedObject, error) {
+	for {
+		tree, err := c.trees.Next()
+		if err != nil {
+			return nil, err
+		}
+
+		obj, err := c.sto.EncodedObject(plumbing.TreeObject, tree.Hash)
+		if err == plumbing.ErrObjectNotFound {
+			continue
+		}
+
+		return obj, err
+	}
+}
+
+func (c *treeObjectIter) ForEach(f func(plumbing.EncodedObject) error) error {
+	return encodedObjectIterForEach(c, f)
+}
+
+func (c *treeObjectIter) Close() {
+	c.trees.Close()
+}
+
+func encodedObjectIterForEach(
+	i storer.EncodedObjectIter,
+	f func(plumbing.EncodedObject) error,
+) error {
+	defer i.Close()
+	for {
+		tree, err := i.Next()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		err = f(tree)
+		if err != nil {
+			return err
+		}
+	}
 }
